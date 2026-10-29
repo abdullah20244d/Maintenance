@@ -1,0 +1,17 @@
+class AuditActions:
+    TICKET_CREATED = "CREATE_TICKET"
+    TICKET_STATUS_CHANGED = "CHANGE_STATUS"
+    TICKET_PRIORITY_CHANGED = "CHANGE_PRIORITY"
+    TICKET_ASSIGNED = "ASSIGN_TECHNICIAN"
+    TICKET_COMMENTED = "ADD_COMMENT"
+    USER_LOGIN = "USER_LOGIN"
+    USER_PASSWORD_CHANGED = "CHANGE_PASSWORD"
+    SETTINGS_UPDATED = "UPDATE_SETTINGS"
+    BACKUP_CREATED = "CREATE_BACKUP"
+
+class PermissionCodes:
+    CAN_VIEW_TICKETS = "tickets.view_ticket"
+    CAN_CHANGE_STATUS = "tickets.change_status"
+    CAN_ASSIGN_TICKETS = "tickets.assign_ticket"
+    CAN_MANAGE_TECHNICIANS = "accounts.manage_technicians"
+    CAN_MANAGE_SETTINGS = "core.manage_settings"

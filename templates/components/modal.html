@@ -1,0 +1,9 @@
+<!-- Reusable Modal Component -->
+<div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+    <div class="bg-white rounded-3xl shadow-2xl max-w-lg w-full p-6 text-right">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+            <h4 class="font-bold text-sm">{% block modal_title %}{% endblock %}</h4>
+        </div>
+        <div class="py-4">{% block modal_content %}{% endblock %}</div>
+    </div>
+</div>

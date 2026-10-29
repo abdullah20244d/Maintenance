@@ -1,0 +1,9 @@
+{% extends 'base/base.html' %}
+
+{% block content %}
+<div class="min-h-[70vh] flex items-center justify-center">
+    <div class="w-full max-w-md bg-white p-8 rounded-3xl shadow-xl border border-slate-200">
+        {% block auth_content %}{% endblock %}
+    </div>
+</div>
+{% endblock %}

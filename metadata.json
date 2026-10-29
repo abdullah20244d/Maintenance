@@ -1,0 +1,6 @@
+{
+  "name": "نظام إدارة بلاغات الدعم الفني والصيانة",
+  "description": "منظومة متكاملة لإدارة بلاغات الصيانة والدعم الفني وتقنية المعلومات للشركات متعددة الفروع مع تتبع التذاكر ولوحة تحكم متقدمة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

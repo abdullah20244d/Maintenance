@@ -1,0 +1,19 @@
+{% extends 'layouts/auth_layout.html' %}
+
+{% block auth_content %}
+<div class="text-right space-y-4">
+    <h2 class="text-xl font-bold text-center">تسجيل دخول الفنيين</h2>
+    <form method="post" action="/accounts/login/" class="space-y-3">
+        {% csrf_token %}
+        <div>
+            <label class="block text-xs font-bold mb-1">اسم المستخدم</label>
+            <input type="text" name="username" class="w-full p-2.5 rounded-xl border border-slate-300 text-xs">
+        </div>
+        <div>
+            <label class="block text-xs font-bold mb-1">كلمة المرور</label>
+            <input type="password" name="password" class="w-full p-2.5 rounded-xl border border-slate-300 text-xs">
+        </div>
+        <button type="submit" class="w-full py-2.5 bg-blue-600 text-white rounded-xl text-xs font-bold">دخول</button>
+    </form>
+</div>
+{% endblock %}

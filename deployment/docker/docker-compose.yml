@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+    container_name: it_ticket_web
+    restart: always
+    volumes:
+      - ../../data:/app/data
+      - ../../static:/app/static
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=production-secret-key-change-me
+      - ALLOWED_HOSTS=*
+    ports:
+      - "8000:8000"
