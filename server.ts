@@ -12,8 +12,8 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize database
-initDatabase();
+// Initialize database (async)
+await initDatabase();
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -69,25 +69,11 @@ function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunctio
       role: string;
     };
 
-    // Verify user is active in DB
-    const user = db.prepare('SELECT id, username, full_name, role, is_active FROM users WHERE id = ?').get(decoded.id) as {
-      id: number;
-      username: string;
-      full_name: string;
-      role: string;
-      is_active: number;
-    } | undefined;
-
-    if (!user || user.is_active !== 1) {
-      res.status(401).json({ error: 'الحساب غير مفعّل أو تم إيقافه' });
-      return;
-    }
-
     req.user = {
-      id: user.id,
-      username: user.username,
-      full_name: user.full_name,
-      role: user.role
+      id: decoded.id,
+      username: decoded.username,
+      full_name: decoded.full_name,
+      role: decoded.role
     };
     next();
   } catch {
@@ -108,16 +94,16 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
 // -----------------------------------------------------------------------------
 
 // Get system public configuration (branches, categories, settings)
-app.get('/api/public/config', (_req: Request, res: Response) => {
+app.get('/api/public/config', async (_req: Request, res: Response) => {
   try {
-    const settingsRows = db.prepare('SELECT key, value FROM system_settings').all() as { key: string; value: string }[];
+    const settingsRows = await db.all('SELECT key, value FROM system_settings');
     const settings: Record<string, string> = {};
     for (const row of settingsRows) {
       settings[row.key] = row.value;
     }
 
-    const branches = db.prepare('SELECT id, name, code, city FROM branches WHERE is_active = 1 ORDER BY name ASC').all();
-    const categories = db.prepare('SELECT id, name, icon, description FROM categories WHERE is_active = 1 ORDER BY id ASC').all();
+    const branches = await db.all('SELECT id, name, code, city FROM branches WHERE is_active = 1 ORDER BY name ASC');
+    const categories = await db.all('SELECT id, name, icon, description FROM categories WHERE is_active = 1 ORDER BY id ASC');
 
     res.json({
       settings,
@@ -131,7 +117,7 @@ app.get('/api/public/config', (_req: Request, res: Response) => {
 });
 
 // Create Ticket
-app.post('/api/public/tickets', (req: Request, res: Response) => {
+app.post('/api/public/tickets', async (req: Request, res: Response) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   if (!checkRateLimit(`ticket_create_${ip}`, 15, 10 * 60 * 1000)) {
     res.status(429).json({ error: 'تم تجاوز عدد البلاغات المسموح بها في وقت قصير. يرجى الانتظار قليلاً.' });
@@ -178,58 +164,49 @@ app.post('/api/public/tickets', (req: Request, res: Response) => {
   const safePriority = validPriorities.includes(priority) ? priority : 'normal';
 
   try {
-    const branch = db.prepare('SELECT id, name FROM branches WHERE id = ? AND is_active = 1').get(branch_id) as { id: number; name: string } | undefined;
+    const branch = await db.get('SELECT id, name FROM branches WHERE id = $1 AND is_active = 1', [branch_id]) as { id: number; name: string } | undefined;
     if (!branch) {
       res.status(400).json({ error: 'الفرع المحدد غير متاح حالياً' });
       return;
     }
 
-    const category = db.prepare('SELECT id, name FROM categories WHERE id = ? AND is_active = 1').get(category_id) as { id: number; name: string } | undefined;
+    const category = await db.get('SELECT id, name FROM categories WHERE id = $1 AND is_active = 1', [category_id]) as { id: number; name: string } | undefined;
     if (!category) {
       res.status(400).json({ error: 'نوع الصيانة المحدد غير متوفر' });
       return;
     }
 
-    const ticketNumber = generateTicketNumber();
+    const ticketNumber = await generateTicketNumber();
     const now = new Date().toISOString();
 
-    const insertTicket = db.prepare(`
-      INSERT INTO tickets (
+    const result = await db.run(
+      `INSERT INTO tickets (
         ticket_number, employee_name, employee_id, branch_id, category_id,
         custom_category, description, priority, status, anydesk_id,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)
-    `);
-
-    const result = insertTicket.run(
-      ticketNumber,
-      employee_name.trim(),
-      employee_id.trim(),
-      branch_id,
-      category_id,
-      custom_category ? custom_category.trim() : null,
-      description.trim(),
-      safePriority,
-      anydesk_id ? anydesk_id.trim() : null,
-      now,
-      now
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'new', $9, $10, $11) RETURNING id`,
+      [ticketNumber, employee_name.trim(), employee_id.trim(), branch_id, category_id,
+        custom_category ? custom_category.trim() : null, description.trim(),
+        safePriority, anydesk_id ? anydesk_id.trim() : null, now, now]
     );
 
-    const ticketId = Number(result.lastInsertRowid);
+    const ticketId = Number((result as any).lastInsertRowid);
 
     // Add initial history record
-    db.prepare(`
-      INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
-      VALUES (?, NULL, 'النظام', 'إنشاء البلاغ', NULL, 'new', 'تم استلام بلاغ الصيانة وتسجيله في النظام', ?)
-    `).run(ticketId, now);
+    await db.run(
+      `INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
+       VALUES ($1, NULL, 'النظام', 'إنشاء البلاغ', NULL, 'new', 'تم استلام بلاغ الصيانة وتسجيله في النظام', $2)`,
+      [ticketId, now]
+    );
 
     // Create notification for technicians
     const notifTitle = safePriority === 'urgent' ? `🚨 بلاغ مستعجل جديد: ${ticketNumber}` : `بلاغ صيانة جديد: ${ticketNumber}`;
     const notifMsg = `بلاغ جديد من الموظف ${employee_name.trim()} (${branch.name}) - ${category.name}`;
-    db.prepare(`
-      INSERT INTO notifications (ticket_id, title, message, type, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(ticketId, notifTitle, notifMsg, safePriority === 'urgent' ? 'urgent_ticket' : 'new_ticket', now);
+    await db.run(
+      `INSERT INTO notifications (ticket_id, title, message, type, created_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [ticketId, notifTitle, notifMsg, safePriority === 'urgent' ? 'urgent_ticket' : 'new_ticket', now]
+    );
 
     res.status(201).json({
       success: true,
@@ -253,7 +230,7 @@ app.post('/api/public/tickets', (req: Request, res: Response) => {
 });
 
 // Track Ticket (Requires exact Ticket Number + Employee ID match)
-app.post('/api/public/tickets/track', (req: Request, res: Response) => {
+app.post('/api/public/tickets/track', async (req: Request, res: Response) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   if (!checkRateLimit(`ticket_track_${ip}`, 30, 5 * 60 * 1000)) {
     res.status(429).json({ error: 'تم تجاوز عدد محاولات الاستعلام المسموح بها. يرجى الانتظار دقيقة والمحاولة ثانية.' });
@@ -296,34 +273,33 @@ app.post('/api/public/tickets/track', (req: Request, res: Response) => {
       JOIN branches b ON t.branch_id = b.id
       JOIN categories c ON t.category_id = c.id
       LEFT JOIN users u ON t.assigned_to = u.id
-      WHERE UPPER(TRIM(t.ticket_number)) = ? AND TRIM(t.employee_id) = ?
+      WHERE UPPER(TRIM(t.ticket_number)) = $1 AND TRIM(t.employee_id) = $2
     `;
 
-    const ticket = db.prepare(query).get(cleanNumber, cleanEmpId) as any;
+    const ticket = await db.get(query, [cleanNumber, cleanEmpId]) as any;
 
     if (!ticket) {
-      // General response without revealing if ticket or employee exists
       res.status(404).json({
         error: 'لم يتم العثور على بلاغ مطابق للبيانات المدخلة. يرجى التحقق من صحة رقم البلاغ والرقم الوظيفي.'
       });
       return;
     }
 
-    // Fetch public comments ONLY (is_internal = 0)
-    const comments = db.prepare(`
-      SELECT author_name, comment, created_at
-      FROM ticket_comments
-      WHERE ticket_id = ? AND is_internal = 0
-      ORDER BY id ASC
-    `).all(ticket.id);
+    const comments = await db.all(
+      `SELECT author_name, comment, created_at
+       FROM ticket_comments
+       WHERE ticket_id = $1 AND is_internal = 0
+       ORDER BY id ASC`,
+      [ticket.id]
+    );
 
-    // Fetch public timeline/history
-    const history = db.prepare(`
-      SELECT action, old_status, new_status, details, created_at
-      FROM ticket_history
-      WHERE ticket_id = ?
-      ORDER BY id ASC
-    `).all(ticket.id);
+    const history = await db.all(
+      `SELECT action, old_status, new_status, details, created_at
+       FROM ticket_history
+       WHERE ticket_id = $1
+       ORDER BY id ASC`,
+      [ticket.id]
+    );
 
     res.json({
       ticket,
@@ -340,7 +316,7 @@ app.post('/api/public/tickets/track', (req: Request, res: Response) => {
 // Authentication Endpoints
 // -----------------------------------------------------------------------------
 
-app.post('/api/auth/login', (req: Request, res: Response) => {
+app.post('/api/auth/login', async (req: Request, res: Response) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   if (!checkRateLimit(`login_${ip}`, 10, 5 * 60 * 1000)) {
     res.status(429).json({ error: 'تم حظر محاولات الدخول مؤقتاً لتكرار المحاولات الخاطئة. انتظر 5 دقائق.' });
@@ -354,7 +330,7 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   }
 
   try {
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(String(username).trim()) as any;
+    const user = await db.get('SELECT * FROM users WHERE username = $1', [String(username).trim()]) as any;
     if (!user) {
       res.status(401).json({ error: 'بيانات تسجيل الدخول غير صحيحة' });
       return;
@@ -372,7 +348,7 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     }
 
     const now = new Date().toISOString();
-    db.prepare('UPDATE users SET last_login = ? WHERE id = ?').run(now, user.id);
+    await db.run('UPDATE users SET last_login = $1 WHERE id = $2', [now, user.id]);
 
     const token = jwt.sign(
       {
@@ -403,16 +379,16 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const user = db.prepare('SELECT id, username, full_name, email, phone, role, last_login FROM users WHERE id = ?').get(req.user!.id);
+    const user = await db.get('SELECT id, username, full_name, email, phone, role, last_login FROM users WHERE id = $1', [req.user!.id]);
     res.json({ user });
   } catch {
     res.status(500).json({ error: 'تعذر التحقق من المستخدم' });
   }
 });
 
-app.post('/api/auth/change-password', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/auth/change-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const { current_password, new_password } = req.body;
   if (!current_password || !new_password || new_password.length < 6) {
     res.status(400).json({ error: 'كلمة المرور الجديدة يجب ألا تقل عن 6 خانات' });
@@ -420,7 +396,7 @@ app.post('/api/auth/change-password', requireAuth, (req: AuthenticatedRequest, r
   }
 
   try {
-    const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user!.id) as { password_hash: string };
+    const user = await db.get('SELECT password_hash FROM users WHERE id = $1', [req.user!.id]) as { password_hash: string };
     const match = bcrypt.compareSync(current_password, user.password_hash);
     if (!match) {
       res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة' });
@@ -428,7 +404,7 @@ app.post('/api/auth/change-password', requireAuth, (req: AuthenticatedRequest, r
     }
 
     const newHash = bcrypt.hashSync(new_password, 10);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, req.user!.id);
+    await db.run('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, req.user!.id]);
 
     res.json({ success: true, message: 'تم تحديث كلمة المرور بنجاح' });
   } catch {
@@ -441,23 +417,33 @@ app.post('/api/auth/change-password', requireAuth, (req: AuthenticatedRequest, r
 // -----------------------------------------------------------------------------
 
 // Dashboard metrics
-app.get('/api/admin/dashboard', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.get('/api/admin/dashboard', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    const totalTickets = (db.prepare('SELECT COUNT(*) as c FROM tickets').get() as { c: number }).c;
-    const newTickets = (db.prepare("SELECT COUNT(*) as c FROM tickets WHERE status = 'new'").get() as { c: number }).c;
-    const urgentOpenTickets = (db.prepare("SELECT COUNT(*) as c FROM tickets WHERE priority = 'urgent' AND status NOT IN ('resolved', 'closed')").get() as { c: number }).c;
-    const inProgressTickets = (db.prepare("SELECT COUNT(*) as c FROM tickets WHERE status IN ('assigned', 'in_progress', 'waiting_employee', 'waiting_spare_parts')").get() as { c: number }).c;
-    const resolvedTickets = (db.prepare("SELECT COUNT(*) as c FROM tickets WHERE status = 'resolved'").get() as { c: number }).c;
-    const closedTickets = (db.prepare("SELECT COUNT(*) as c FROM tickets WHERE status = 'closed'").get() as { c: number }).c;
+    const totalTicketsRow = await db.get('SELECT COUNT(*) as c FROM tickets') as { c: number };
+    const totalTickets = totalTicketsRow.c;
+
+    const newTicketsRow = await db.get("SELECT COUNT(*) as c FROM tickets WHERE status = 'new'") as { c: number };
+    const newTickets = newTicketsRow.c;
+
+    const urgentOpenTicketsRow = await db.get("SELECT COUNT(*) as c FROM tickets WHERE priority = 'urgent' AND status NOT IN ('resolved', 'closed')") as { c: number };
+    const urgentOpenTickets = urgentOpenTicketsRow.c;
+
+    const inProgressTicketsRow = await db.get("SELECT COUNT(*) as c FROM tickets WHERE status IN ('assigned', 'in_progress', 'waiting_employee', 'waiting_spare_parts')") as { c: number };
+    const inProgressTickets = inProgressTicketsRow.c;
+
+    const resolvedTicketsRow = await db.get("SELECT COUNT(*) as c FROM tickets WHERE status = 'resolved'") as { c: number };
+    const resolvedTickets = resolvedTicketsRow.c;
+
+    const closedTicketsRow = await db.get("SELECT COUNT(*) as c FROM tickets WHERE status = 'closed'") as { c: number };
+    const closedTickets = closedTicketsRow.c;
 
     const completedTotal = resolvedTickets + closedTickets;
     const completionRate = totalTickets > 0 ? Math.round((completedTotal / totalTickets) * 100) : 0;
 
-    // Calculate Average Resolution Hours from completed tickets with created_at and resolved_at
-    const resolvedTimeRows = db.prepare(`
+    const resolvedTimeRows = await db.all(`
       SELECT created_at, resolved_at FROM tickets 
       WHERE resolved_at IS NOT NULL
-    `).all() as { created_at: string; resolved_at: string }[];
+    `) as { created_at: string; resolved_at: string }[];
 
     let avgResolutionHours = 0;
     if (resolvedTimeRows.length > 0) {
@@ -468,8 +454,7 @@ app.get('/api/admin/dashboard', requireAuth, (_req: AuthenticatedRequest, res: R
       avgResolutionHours = Math.round((totalHours / resolvedTimeRows.length) * 10) / 10;
     }
 
-    // Urgent Tickets list (top priority, waiting duration)
-    const urgentTickets = db.prepare(`
+    const urgentTickets = await db.all(`
       SELECT 
         t.id, t.ticket_number, t.employee_name, t.employee_id, t.description,
         t.priority, t.status, t.created_at,
@@ -484,42 +469,37 @@ app.get('/api/admin/dashboard', requireAuth, (_req: AuthenticatedRequest, res: R
       WHERE t.priority = 'urgent' AND t.status NOT IN ('resolved', 'closed')
       ORDER BY t.created_at ASC
       LIMIT 10
-    `).all();
+    `);
 
-    // Tickets by category
-    const categoryStats = db.prepare(`
+    const categoryStats = await db.all(`
       SELECT c.name, COUNT(t.id) as count
       FROM categories c
       LEFT JOIN tickets t ON c.id = t.category_id
       GROUP BY c.id, c.name
       ORDER BY count DESC
-    `).all();
+    `);
 
-    // Tickets by branch
-    const branchStats = db.prepare(`
+    const branchStats = await db.all(`
       SELECT b.name, COUNT(t.id) as count
       FROM branches b
       LEFT JOIN tickets t ON b.id = t.branch_id
       GROUP BY b.id, b.name
       ORDER BY count DESC
-    `).all();
+    `);
 
-    // Tickets by status
-    const statusStats = db.prepare(`
+    const statusStats = await db.all(`
       SELECT status, COUNT(*) as count
       FROM tickets
       GROUP BY status
-    `).all();
+    `);
 
-    // Tickets by priority
-    const priorityStats = db.prepare(`
+    const priorityStats = await db.all(`
       SELECT priority, COUNT(*) as count
       FROM tickets
       GROUP BY priority
-    `).all();
+    `);
 
-    // Recent 5 tickets
-    const recentTickets = db.prepare(`
+    const recentTickets = await db.all(`
       SELECT 
         t.id, t.ticket_number, t.employee_name, t.employee_id,
         t.priority, t.status, t.created_at,
@@ -532,7 +512,7 @@ app.get('/api/admin/dashboard', requireAuth, (_req: AuthenticatedRequest, res: R
       LEFT JOIN users u ON t.assigned_to = u.id
       ORDER BY t.created_at DESC
       LIMIT 6
-    `).all();
+    `);
 
     res.json({
       metrics: {
@@ -559,7 +539,7 @@ app.get('/api/admin/dashboard', requireAuth, (_req: AuthenticatedRequest, res: R
 });
 
 // Query tickets with search, filters, pagination
-app.get('/api/admin/tickets', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/admin/tickets', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const {
       search,
@@ -581,27 +561,27 @@ app.get('/api/admin/tickets', requireAuth, (req: AuthenticatedRequest, res: Resp
 
     if (search && typeof search === 'string' && search.trim() !== '') {
       const term = `%${search.trim()}%`;
-      conditions.push('(t.ticket_number LIKE ? OR t.employee_name LIKE ? OR t.employee_id LIKE ? OR t.description LIKE ?)');
+      conditions.push('(t.ticket_number LIKE $1 OR t.employee_name LIKE $2 OR t.employee_id LIKE $3 OR t.description LIKE $4)');
       params.push(term, term, term, term);
     }
 
     if (branch_id) {
-      conditions.push('t.branch_id = ?');
+      conditions.push(`t.branch_id = $${params.length + 1}`);
       params.push(Number(branch_id));
     }
 
     if (category_id) {
-      conditions.push('t.category_id = ?');
+      conditions.push(`t.category_id = $${params.length + 1}`);
       params.push(Number(category_id));
     }
 
     if (priority) {
-      conditions.push('t.priority = ?');
+      conditions.push(`t.priority = $${params.length + 1}`);
       params.push(String(priority));
     }
 
     if (status) {
-      conditions.push('t.status = ?');
+      conditions.push(`t.status = $${params.length + 1}`);
       params.push(String(status));
     }
 
@@ -609,25 +589,26 @@ app.get('/api/admin/tickets', requireAuth, (req: AuthenticatedRequest, res: Resp
       if (assigned_to === 'unassigned') {
         conditions.push('t.assigned_to IS NULL');
       } else {
-        conditions.push('t.assigned_to = ?');
+        conditions.push(`t.assigned_to = $${params.length + 1}`);
         params.push(Number(assigned_to));
       }
     }
 
     if (date_from) {
-      conditions.push('t.created_at >= ?');
+      conditions.push(`t.created_at >= $${params.length + 1}`);
       params.push(String(date_from));
     }
 
     if (date_to) {
-      conditions.push('t.created_at <= ?');
+      conditions.push(`t.created_at <= $${params.length + 1}`);
       params.push(String(date_to) + 'T23:59:59Z');
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const countQuery = `SELECT COUNT(*) as count FROM tickets t ${whereClause}`;
-    const total = (db.prepare(countQuery).get(...params) as { count: number }).count;
+    const totalRow = await db.get(countQuery, params) as { count: number };
+    const total = totalRow.count;
 
     const safeSortDir = sort_dir === 'asc' ? 'ASC' : 'DESC';
     let safeSortCol = 't.created_at';
@@ -655,10 +636,10 @@ app.get('/api/admin/tickets', requireAuth, (req: AuthenticatedRequest, res: Resp
       LEFT JOIN users u ON t.assigned_to = u.id
       ${whereClause}
       ORDER BY ${safeSortCol} ${safeSortDir}
-      LIMIT ? OFFSET ?
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `;
 
-    const tickets = db.prepare(ticketsQuery).all(...params, l, offset);
+    const tickets = await db.all(ticketsQuery, [...params, l, offset]);
 
     res.json({
       tickets,
@@ -674,10 +655,10 @@ app.get('/api/admin/tickets', requireAuth, (req: AuthenticatedRequest, res: Resp
 });
 
 // Single ticket details with full comments and audit history
-app.get('/api/admin/tickets/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/admin/tickets/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const ticket = db.prepare(`
+    const ticket = await db.get(`
       SELECT 
         t.*,
         b.name as branch_name,
@@ -689,31 +670,31 @@ app.get('/api/admin/tickets/:id', requireAuth, (req: AuthenticatedRequest, res: 
       JOIN branches b ON t.branch_id = b.id
       JOIN categories c ON t.category_id = c.id
       LEFT JOIN users u ON t.assigned_to = u.id
-      WHERE t.id = ?
-    `).get(id) as any;
+      WHERE t.id = $1
+    `, [id]) as any;
 
     if (!ticket) {
       res.status(404).json({ error: 'البلاغ غير موجود' });
       return;
     }
 
-    const comments = db.prepare(`
+    const comments = await db.all(`
       SELECT 
         tc.id, tc.ticket_id, tc.user_id, tc.author_name, tc.comment,
         tc.is_internal, tc.created_at,
         u.role as author_role
       FROM ticket_comments tc
       LEFT JOIN users u ON tc.user_id = u.id
-      WHERE tc.ticket_id = ?
+      WHERE tc.ticket_id = $1
       ORDER BY tc.id ASC
-    `).all(id);
+    `, [id]);
 
-    const history = db.prepare(`
+    const history = await db.all(`
       SELECT id, user_id, user_name, action, old_status, new_status, details, created_at
       FROM ticket_history
-      WHERE ticket_id = ?
+      WHERE ticket_id = $1
       ORDER BY id ASC
-    `).all(id);
+    `, [id]);
 
     res.json({ ticket, comments, history });
   } catch (error) {
@@ -723,10 +704,10 @@ app.get('/api/admin/tickets/:id', requireAuth, (req: AuthenticatedRequest, res: 
 });
 
 // Update ticket status, priority, technician, or resolution details
-app.patch('/api/admin/tickets/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+app.patch('/api/admin/tickets/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const existing = db.prepare('SELECT * FROM tickets WHERE id = ?').get(id) as any;
+    const existing = await db.get('SELECT * FROM tickets WHERE id = $1', [id]) as any;
     if (!existing) {
       res.status(404).json({ error: 'البلاغ غير موجود' });
       return;
@@ -765,35 +746,20 @@ app.patch('/api/admin/tickets/:id', requireAuth, (req: AuthenticatedRequest, res
         closedAt = now;
       }
 
-      // Log status change in history
-      db.prepare(`
-        INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
-        VALUES (?, ?, ?, 'تغيير الحالة', ?, ?, ?, ?)
-      `).run(
-        id,
-        req.user!.id,
-        req.user!.full_name,
-        existing.status,
-        status,
-        `تحديث الحالة بواسطة ${req.user!.full_name}${internal_note ? ': ' + internal_note : ''}`,
-        now
+      await db.run(
+        `INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
+         VALUES ($1, $2, $3, 'تغيير الحالة', $4, $5, $6, $7)`,
+        [id, req.user!.id, req.user!.full_name, existing.status, status, `تحديث الحالة بواسطة ${req.user!.full_name}${internal_note ? ': ' + internal_note : ''}`, now]
       );
     }
 
     // Check priority change
     if (priority && priority !== existing.priority) {
       updatedPriority = priority;
-      db.prepare(`
-        INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
-        VALUES (?, ?, ?, 'تعديل الأولوية', ?, ?, ?, ?)
-      `).run(
-        id,
-        req.user!.id,
-        req.user!.full_name,
-        existing.priority,
-        priority,
-        `تم تعديل الأولوية من ${existing.priority} إلى ${priority}`,
-        now
+      await db.run(
+        `INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
+         VALUES ($1, $2, $3, 'تعديل الأولوية', $4, $5, $6, $7)`,
+        [id, req.user!.id, req.user!.full_name, existing.priority, priority, `تم تعديل الأولوية من ${existing.priority} إلى ${priority}`, now]
       );
     }
 
@@ -802,73 +768,54 @@ app.patch('/api/admin/tickets/:id', requireAuth, (req: AuthenticatedRequest, res
       updatedAssignedTo = assigned_to ? Number(assigned_to) : null;
       let techName = 'إلغاء الإسناد';
       if (updatedAssignedTo) {
-        const tech = db.prepare('SELECT full_name FROM users WHERE id = ?').get(updatedAssignedTo) as { full_name: string } | undefined;
+        const tech = await db.get('SELECT full_name FROM users WHERE id = $1', [updatedAssignedTo]) as { full_name: string } | undefined;
         techName = tech ? tech.full_name : `فني #${updatedAssignedTo}`;
-        
-        // Auto transition to 'assigned' if currently 'new'
+
         if (updatedStatus === 'new') {
           updatedStatus = 'assigned';
         }
       }
 
-      db.prepare(`
-        INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
-        VALUES (?, ?, ?, 'إسناد البلاغ', ?, ?, ?, ?)
-      `).run(
-        id,
-        req.user!.id,
-        req.user!.full_name,
-        existing.status,
-        updatedStatus,
-        `تم إسناد البلاغ إلى ${techName}`,
-        now
+      await db.run(
+        `INSERT INTO ticket_history (ticket_id, user_id, user_name, action, old_status, new_status, details, created_at)
+         VALUES ($1, $2, $3, 'إسناد البلاغ', $4, $5, $6, $7)`,
+        [id, req.user!.id, req.user!.full_name, existing.status, updatedStatus, `تم إسناد البلاغ إلى ${techName}`, now]
       );
 
-      // Notification
       if (updatedAssignedTo) {
-        db.prepare(`
-          INSERT INTO notifications (ticket_id, title, message, type, created_at)
-          VALUES (?, ?, ?, 'assigned', ?)
-        `).run(id, `تم إسناد بلاغ جديد إليك`, `البلاغ رقم ${existing.ticket_number} أُسند إليك من قِبل ${req.user!.full_name}`, now);
+        await db.run(
+          `INSERT INTO notifications (ticket_id, title, message, type, created_at)
+           VALUES ($1, $2, $3, 'assigned', $4)`,
+          [id, `تم إسناد بلاغ جديد إليك`, `البلاغ رقم ${existing.ticket_number} أُسند إليك من قِبل ${req.user!.full_name}`, now]
+        );
       }
     }
 
-    // Update ticket row
-    db.prepare(`
-      UPDATE tickets SET
-        status = ?,
-        priority = ?,
-        assigned_to = ?,
-        resolution_cause = COALESCE(?, resolution_cause),
-        resolution_action = COALESCE(?, resolution_action),
-        resolution_parts = COALESCE(?, resolution_parts),
-        unrepairable_reason = COALESCE(?, unrepairable_reason),
-        work_started_at = ?,
-        resolved_at = ?,
-        closed_at = ?,
-        updated_at = ?
-      WHERE id = ?
-    `).run(
-      updatedStatus,
-      updatedPriority,
-      updatedAssignedTo,
-      resolution_cause || null,
-      resolution_action || null,
-      resolution_parts || null,
-      unrepairable_reason || null,
-      workStartedAt,
-      resolvedAt,
-      closedAt,
-      now,
-      id
+    await db.run(
+      `UPDATE tickets SET
+        status = $1,
+        priority = $2,
+        assigned_to = $3,
+        resolution_cause = COALESCE($4, resolution_cause),
+        resolution_action = COALESCE($5, resolution_action),
+        resolution_parts = COALESCE($6, resolution_parts),
+        unrepairable_reason = COALESCE($7, unrepairable_reason),
+        work_started_at = $8,
+        resolved_at = $9,
+        closed_at = $10,
+        updated_at = $11
+        WHERE id = $12`,
+      [updatedStatus, updatedPriority, updatedAssignedTo,
+        resolution_cause || null, resolution_action || null, resolution_parts || null, unrepairable_reason || null,
+        workStartedAt, resolvedAt, closedAt, now, id]
     );
 
-    // If an internal note was provided with this action, record it as a comment
     if (internal_note && typeof internal_note === 'string' && internal_note.trim().length > 0) {
-      db.prepare(`
-        INSERT INTO ticket_comments (ticket_id, user_id, author_name, comment, is_internal, created_at)
-        VALUES (?, ?, ?, ?, 1, ?)
-      `).run(id, req.user!.id, req.user!.full_name, internal_note.trim(), now);
+      await db.run(
+        `INSERT INTO ticket_comments (ticket_id, user_id, author_name, comment, is_internal, created_at)
+         VALUES ($1, $2, $3, $4, 1, $5)`,
+        [id, req.user!.id, req.user!.full_name, internal_note.trim(), now]
+      );
     }
 
     res.json({ success: true, message: 'تم تحديث البلاغ بنجاح' });
@@ -879,7 +826,7 @@ app.patch('/api/admin/tickets/:id', requireAuth, (req: AuthenticatedRequest, res
 });
 
 // Add comment to ticket (public or internal)
-app.post('/api/admin/tickets/:id/comments', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/tickets/:id/comments', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const ticketId = Number(req.params.id);
     const { comment, is_internal = 0 } = req.body;
@@ -890,37 +837,27 @@ app.post('/api/admin/tickets/:id/comments', requireAuth, (req: AuthenticatedRequ
     }
 
     const now = new Date().toISOString();
-    const result = db.prepare(`
-      INSERT INTO ticket_comments (ticket_id, user_id, author_name, comment, is_internal, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      ticketId,
-      req.user!.id,
-      req.user!.full_name,
-      comment.trim(),
-      is_internal ? 1 : 0,
-      now
+    const result = await db.run(
+      `INSERT INTO ticket_comments (ticket_id, user_id, author_name, comment, is_internal, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [ticketId, req.user!.id, req.user!.full_name, comment.trim(), is_internal ? 1 : 0, now]
     );
 
-    // Update ticket updated_at
-    db.prepare('UPDATE tickets SET updated_at = ? WHERE id = ?').run(now, ticketId);
+    await db.run('UPDATE tickets SET updated_at = $1 WHERE id = $2', [now, ticketId]);
 
-    // Log action in audit history
-    db.prepare(`
-      INSERT INTO ticket_history (ticket_id, user_id, user_name, action, details, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      ticketId,
-      req.user!.id,
-      req.user!.full_name,
-      is_internal ? 'إضافة ملاحظة فنية داخلية' : 'إضافة ملاحظة متابعة للموظف',
-      comment.trim().slice(0, 80) + (comment.trim().length > 80 ? '...' : ''),
-      now
+    await db.run(
+      `INSERT INTO ticket_history (ticket_id, user_id, user_name, action, details, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [ticketId, req.user!.id, req.user!.full_name,
+        is_internal ? 'إضافة ملاحظة فنية داخلية' : 'إضافة ملاحظة متابعة للموظف',
+        comment.trim().slice(0, 80) + (comment.trim().length > 80 ? '...' : ''),
+        now]
     );
 
+    const commentId = Number((result as any).lastInsertRowid);
     res.status(201).json({
       comment: {
-        id: Number(result.lastInsertRowid),
+        id: commentId,
         ticket_id: ticketId,
         user_id: req.user!.id,
         author_name: req.user!.full_name,
@@ -939,9 +876,9 @@ app.post('/api/admin/tickets/:id/comments', requireAuth, (req: AuthenticatedRequ
 // Technicians Management Endpoints
 // -----------------------------------------------------------------------------
 
-app.get('/api/admin/technicians', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.get('/api/admin/technicians', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    const technicians = db.prepare(`
+    const technicians = await db.all(`
       SELECT 
         u.id, u.username, u.full_name, u.email, u.phone, u.role, u.is_active, u.created_at, u.last_login,
         COUNT(CASE WHEN t.status IN ('assigned', 'in_progress', 'waiting_employee', 'waiting_spare_parts') THEN 1 END) as active_tickets_count,
@@ -950,7 +887,7 @@ app.get('/api/admin/technicians', requireAuth, (_req: AuthenticatedRequest, res:
       LEFT JOIN tickets t ON u.id = t.assigned_to
       GROUP BY u.id
       ORDER BY u.role ASC, u.full_name ASC
-    `).all();
+    `);
 
     res.json({ technicians });
   } catch (error) {
@@ -959,7 +896,7 @@ app.get('/api/admin/technicians', requireAuth, (_req: AuthenticatedRequest, res:
   }
 });
 
-app.post('/api/admin/technicians', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/technicians', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { username, password, full_name, email, phone, role = 'technician' } = req.body;
 
@@ -979,7 +916,7 @@ app.post('/api/admin/technicians', requireAuth, requireAdmin, (req: Authenticate
     }
 
     const cleanUsername = username.trim().toLowerCase();
-    const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername);
+    const existing = await db.get('SELECT id FROM users WHERE username = $1', [cleanUsername]);
     if (existing) {
       res.status(400).json({ error: 'اسم المستخدم مستخدم بالفعل، يرجى اختيار اسم آخر' });
       return;
@@ -991,23 +928,16 @@ app.post('/api/admin/technicians', requireAuth, requireAdmin, (req: Authenticate
     const hash = bcrypt.hashSync(password, 10);
     const now = new Date().toISOString();
 
-    const result = db.prepare(`
-      INSERT INTO users (username, password_hash, full_name, email, phone, role, is_active, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(
-      cleanUsername,
-      hash,
-      full_name.trim(),
-      email ? email.trim() : null,
-      phone ? phone.trim() : null,
-      safeRole,
-      now
+    const result = await db.run(
+      `INSERT INTO users (username, password_hash, full_name, email, phone, role, is_active, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 1, $7) RETURNING id`,
+      [cleanUsername, hash, full_name.trim(), email ? email.trim() : null, phone ? phone.trim() : null, safeRole, now]
     );
 
     res.status(201).json({
       success: true,
       technician: {
-        id: Number(result.lastInsertRowid),
+        id: Number((result as any).lastInsertRowid),
         username: cleanUsername,
         full_name: full_name.trim(),
         role: safeRole,
@@ -1020,10 +950,10 @@ app.post('/api/admin/technicians', requireAuth, requireAdmin, (req: Authenticate
   }
 });
 
-app.patch('/api/admin/technicians/:id', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.patch('/api/admin/technicians/:id', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const existing = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id) as any;
+    const existing = await db.get('SELECT id, role FROM users WHERE id = $1', [id]) as any;
     if (!existing) {
       res.status(404).json({ error: 'المستخدم غير موجود' });
       return;
@@ -1031,30 +961,29 @@ app.patch('/api/admin/technicians/:id', requireAuth, requireAdmin, (req: Authent
 
     const { full_name, email, phone, role, is_active, new_password } = req.body;
 
-    // Prevent deactivating own account
     if (id === req.user!.id && is_active === 0) {
       res.status(400).json({ error: 'لا يمكنك تعطيل حسابك الخاص وأنت مسجل الدخول به' });
       return;
     }
 
     if (full_name) {
-      db.prepare('UPDATE users SET full_name = ? WHERE id = ?').run(full_name.trim(), id);
+      await db.run('UPDATE users SET full_name = $1 WHERE id = $2', [full_name.trim(), id]);
     }
     if (email !== undefined) {
-      db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email ? email.trim() : null, id);
+      await db.run('UPDATE users SET email = $1 WHERE id = $2', [email ? email.trim() : null, id]);
     }
     if (phone !== undefined) {
-      db.prepare('UPDATE users SET phone = ? WHERE id = ?').run(phone ? phone.trim() : null, id);
+      await db.run('UPDATE users SET phone = $1 WHERE id = $2', [phone ? phone.trim() : null, id]);
     }
     if (role && ['admin', 'supervisor', 'technician'].includes(role)) {
-      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+      await db.run('UPDATE users SET role = $1 WHERE id = $2', [role, id]);
     }
     if (is_active !== undefined) {
-      db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, id);
+      await db.run('UPDATE users SET is_active = $1 WHERE id = $2', [is_active ? 1 : 0, id]);
     }
     if (new_password && new_password.length >= 6) {
       const hash = bcrypt.hashSync(new_password, 10);
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, id);
+      await db.run('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
     }
 
     res.json({ success: true, message: 'تم تحديث بيانات الفني بنجاح' });
@@ -1068,16 +997,16 @@ app.patch('/api/admin/technicians/:id', requireAuth, requireAdmin, (req: Authent
 // Settings, Branches, and Categories Management
 // -----------------------------------------------------------------------------
 
-app.get('/api/admin/settings', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.get('/api/admin/settings', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    const settingsRows = db.prepare('SELECT key, value FROM system_settings').all() as { key: string; value: string }[];
+    const settingsRows = await db.all('SELECT key, value FROM system_settings') as { key: string; value: string }[];
     const settings: Record<string, string> = {};
     for (const row of settingsRows) {
       settings[row.key] = row.value;
     }
 
-    const branches = db.prepare('SELECT * FROM branches ORDER BY id ASC').all();
-    const categories = db.prepare('SELECT * FROM categories ORDER BY id ASC').all();
+    const branches = await db.all('SELECT * FROM branches ORDER BY id ASC');
+    const categories = await db.all('SELECT * FROM categories ORDER BY id ASC');
 
     res.json({ settings, branches, categories });
   } catch (error) {
@@ -1086,7 +1015,7 @@ app.get('/api/admin/settings', requireAuth, (_req: AuthenticatedRequest, res: Re
   }
 });
 
-app.post('/api/admin/settings', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/settings', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { settings } = req.body;
     if (!settings || typeof settings !== 'object') {
@@ -1094,13 +1023,11 @@ app.post('/api/admin/settings', requireAuth, requireAdmin, (req: AuthenticatedRe
       return;
     }
 
-    const updateStmt = db.prepare('INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)');
-    const tx = db.transaction(() => {
+    await db.transaction(async () => {
       for (const [k, v] of Object.entries(settings)) {
-        updateStmt.run(k, String(v));
+        await db.run('INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [k, String(v)]);
       }
     });
-    tx();
 
     res.json({ success: true, message: 'تم حفظ الإعدادات بنجاح' });
   } catch (error) {
@@ -1110,7 +1037,7 @@ app.post('/api/admin/settings', requireAuth, requireAdmin, (req: AuthenticatedRe
 });
 
 // Branches CRUD
-app.post('/api/admin/branches', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/branches', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, code, city } = req.body;
     if (!name || !code) {
@@ -1119,17 +1046,15 @@ app.post('/api/admin/branches', requireAuth, requireAdmin, (req: AuthenticatedRe
     }
 
     const now = new Date().toISOString();
-    const result = db.prepare('INSERT INTO branches (name, code, city, created_at) VALUES (?, ?, ?, ?)').run(
-      name.trim(),
-      code.trim().toUpperCase(),
-      city ? city.trim() : null,
-      now
+    const result = await db.run(
+      'INSERT INTO branches (name, code, city, created_at) VALUES ($1, $2, $3, $4) RETURNING id',
+      [name.trim(), code.trim().toUpperCase(), city ? city.trim() : null, now]
     );
 
     res.status(201).json({
       success: true,
       branch: {
-        id: Number(result.lastInsertRowid),
+        id: Number((result as any).lastInsertRowid),
         name: name.trim(),
         code: code.trim().toUpperCase(),
         city: city ? city.trim() : null,
@@ -1137,7 +1062,7 @@ app.post('/api/admin/branches', requireAuth, requireAdmin, (req: AuthenticatedRe
       }
     });
   } catch (error: any) {
-    if (error.message?.includes('UNIQUE')) {
+    if (error.message?.includes('UNIQUE') || error.message?.includes('duplicate')) {
       res.status(400).json({ error: 'رمز الفرع موجود مسبقاً' });
       return;
     }
@@ -1145,15 +1070,15 @@ app.post('/api/admin/branches', requireAuth, requireAdmin, (req: AuthenticatedRe
   }
 });
 
-app.patch('/api/admin/branches/:id', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.patch('/api/admin/branches/:id', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     const { name, code, city, is_active } = req.body;
 
-    if (name) db.prepare('UPDATE branches SET name = ? WHERE id = ?').run(name.trim(), id);
-    if (code) db.prepare('UPDATE branches SET code = ? WHERE id = ?').run(code.trim().toUpperCase(), id);
-    if (city !== undefined) db.prepare('UPDATE branches SET city = ? WHERE id = ?').run(city ? city.trim() : null, id);
-    if (is_active !== undefined) db.prepare('UPDATE branches SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, id);
+    if (name) await db.run('UPDATE branches SET name = $1 WHERE id = $2', [name.trim(), id]);
+    if (code) await db.run('UPDATE branches SET code = $1 WHERE id = $2', [code.trim().toUpperCase(), id]);
+    if (city !== undefined) await db.run('UPDATE branches SET city = $1 WHERE id = $2', [city ? city.trim() : null, id]);
+    if (is_active !== undefined) await db.run('UPDATE branches SET is_active = $1 WHERE id = $2', [is_active ? 1 : 0, id]);
 
     res.json({ success: true, message: 'تم تحديث الفرع بنجاح' });
   } catch {
@@ -1162,7 +1087,7 @@ app.patch('/api/admin/branches/:id', requireAuth, requireAdmin, (req: Authentica
 });
 
 // Categories CRUD
-app.post('/api/admin/categories', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/categories', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, icon = 'Tag', description = '' } = req.body;
     if (!name || name.trim().length === 0) {
@@ -1171,17 +1096,15 @@ app.post('/api/admin/categories', requireAuth, requireAdmin, (req: Authenticated
     }
 
     const now = new Date().toISOString();
-    const result = db.prepare('INSERT INTO categories (name, icon, description, created_at) VALUES (?, ?, ?, ?)').run(
-      name.trim(),
-      icon,
-      description ? description.trim() : null,
-      now
+    const result = await db.run(
+      'INSERT INTO categories (name, icon, description, created_at) VALUES ($1, $2, $3, $4) RETURNING id',
+      [name.trim(), icon, description ? description.trim() : null, now]
     );
 
     res.status(201).json({
       success: true,
       category: {
-        id: Number(result.lastInsertRowid),
+        id: Number((result as any).lastInsertRowid),
         name: name.trim(),
         icon,
         description,
@@ -1193,15 +1116,15 @@ app.post('/api/admin/categories', requireAuth, requireAdmin, (req: Authenticated
   }
 });
 
-app.patch('/api/admin/categories/:id', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.patch('/api/admin/categories/:id', requireAuth, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     const { name, icon, description, is_active } = req.body;
 
-    if (name) db.prepare('UPDATE categories SET name = ? WHERE id = ?').run(name.trim(), id);
-    if (icon) db.prepare('UPDATE categories SET icon = ? WHERE id = ?').run(icon, id);
-    if (description !== undefined) db.prepare('UPDATE categories SET description = ? WHERE id = ?').run(description ? description.trim() : null, id);
-    if (is_active !== undefined) db.prepare('UPDATE categories SET is_active = ? WHERE id = ?').run(is_active ? 1 : 0, id);
+    if (name) await db.run('UPDATE categories SET name = $1 WHERE id = $2', [name.trim(), id]);
+    if (icon) await db.run('UPDATE categories SET icon = $1 WHERE id = $2', [icon, id]);
+    if (description !== undefined) await db.run('UPDATE categories SET description = $1 WHERE id = $2', [description ? description.trim() : null, id]);
+    if (is_active !== undefined) await db.run('UPDATE categories SET is_active = $1 WHERE id = $2', [is_active ? 1 : 0, id]);
 
     res.json({ success: true, message: 'تم تحديث نوع الصيانة بنجاح' });
   } catch {
@@ -1210,19 +1133,19 @@ app.patch('/api/admin/categories/:id', requireAuth, requireAdmin, (req: Authenti
 });
 
 // Notifications
-app.get('/api/admin/notifications', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.get('/api/admin/notifications', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    const notifications = db.prepare('SELECT * FROM notifications ORDER BY id DESC LIMIT 30').all();
-    const unreadCount = (db.prepare('SELECT COUNT(*) as c FROM notifications WHERE is_read = 0').get() as { c: number }).c;
-    res.json({ notifications, unreadCount });
+    const notifications = await db.all('SELECT * FROM notifications ORDER BY id DESC LIMIT 30');
+    const unreadCountRow = await db.get('SELECT COUNT(*) as c FROM notifications WHERE is_read = 0') as { c: number };
+    res.json({ notifications, unreadCount: unreadCountRow.c });
   } catch {
     res.status(500).json({ error: 'تعذر جلب التنبيهات' });
   }
 });
 
-app.patch('/api/admin/notifications/mark-read', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.patch('/api/admin/notifications/mark-read', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    db.prepare('UPDATE notifications SET is_read = 1').run();
+    await db.run('UPDATE notifications SET is_read = 1');
     res.json({ success: true });
   } catch {
     res.status(500).json({ error: 'تعذر تحديث الإشعارات' });
@@ -1230,16 +1153,16 @@ app.patch('/api/admin/notifications/mark-read', requireAuth, (_req: Authenticate
 });
 
 // Full database backup export (JSON)
-app.get('/api/admin/backup', requireAuth, requireAdmin, (_req: AuthenticatedRequest, res: Response) => {
+app.get('/api/admin/backup', requireAuth, requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
   try {
     const tables = {
-      system_settings: db.prepare('SELECT * FROM system_settings').all(),
-      branches: db.prepare('SELECT * FROM branches').all(),
-      categories: db.prepare('SELECT * FROM categories').all(),
-      users: db.prepare('SELECT id, username, full_name, email, phone, role, is_active, created_at, last_login FROM users').all(),
-      tickets: db.prepare('SELECT * FROM tickets').all(),
-      ticket_comments: db.prepare('SELECT * FROM ticket_comments').all(),
-      ticket_history: db.prepare('SELECT * FROM ticket_history').all(),
+      system_settings: await db.all('SELECT * FROM system_settings'),
+      branches: await db.all('SELECT * FROM branches'),
+      categories: await db.all('SELECT * FROM categories'),
+      users: await db.all('SELECT id, username, full_name, email, phone, role, is_active, created_at, last_login FROM users'),
+      tickets: await db.all('SELECT * FROM tickets'),
+      ticket_comments: await db.all('SELECT * FROM ticket_comments'),
+      ticket_history: await db.all('SELECT * FROM ticket_history'),
       exported_at: new Date().toISOString(),
       system_version: '1.0.0-ITSM'
     };
