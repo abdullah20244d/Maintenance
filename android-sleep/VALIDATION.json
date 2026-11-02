@@ -1,17 +1,34 @@
 {
-  "structural_checks": "passed",
-  "checks": [
-    "XML parsed: app/src/main/AndroidManifest.xml",
-    "XML parsed: app/src/main/res/drawable/ic_moon.xml",
-    "XML parsed: app/src/main/res/values/styles.xml",
-    "All manifest components have Kotlin class declarations",
-    "No Internet, microphone, contacts, or location permissions",
-    "Exact alarm API and permission check present; no claimed wearable client",
-    "Fallback chime resource exists"
+  "version": "0.1.0",
+  "apk_sha256": "91cf26cebee56161689fdf53662b0e8e2d40f2cf37ed36764c8706d3a4d2c405",
+  "kotlin_compilation": "passed",
+  "unit_tests": "passed (SleepMathTest: 7 tests)",
+  "android_lint": "passed",
+  "apk_assembly": "passed",
+  "apk_signature_verification": "passed via apksigner",
+  "build_run": "https://github.com/abdullah20244d/Maintenance/actions/runs/41495253208",
+  "build_source_commit": "e6f227f899b44ef329ad297928cebe3145e2e9de",
+  "emulator_smoke": {
+    "status": "passed",
+    "api": 35,
+    "run": "https://github.com/abdullah20244d/Maintenance/actions/runs/41496528846",
+    "checks": [
+      "APK installation",
+      "Arabic UI launch",
+      "Exact alarm special access via Android settings",
+      "Alarm dispatch with screen turned off and connectivity disabled",
+      "Foreground alarm service active",
+      "Stop action through app UI",
+      "No app crash during test"
+    ]
+  },
+  "not_verified": [
+    "Samsung S24 Ultra physical device / One UI",
+    "audible sound level on physical hardware",
+    "Doze, battery saver, overnight reliability",
+    "reboot and timezone changes on physical hardware",
+    "snooze on device"
   ],
-  "kotlin_compilation": "NOT RUN: SDK and Gradle unavailable; download blocked",
-  "unit_tests": "AUTHORED, NOT RUN",
-  "lint": "NOT RUN",
-  "device_tests": "NOT RUN",
-  "apk": "NOT PRODUCED"
+  "medical_status": "Wellness helper; no sleep-stage measurement or medical validation",
+  "wearables": "Not implemented; smart window falls back to fixed deadline"
 }
