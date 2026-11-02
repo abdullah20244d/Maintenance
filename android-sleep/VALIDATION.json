@@ -1,0 +1,17 @@
+{
+  "structural_checks": "passed",
+  "checks": [
+    "XML parsed: app/src/main/AndroidManifest.xml",
+    "XML parsed: app/src/main/res/drawable/ic_moon.xml",
+    "XML parsed: app/src/main/res/values/styles.xml",
+    "All manifest components have Kotlin class declarations",
+    "No Internet, microphone, contacts, or location permissions",
+    "Exact alarm API and permission check present; no claimed wearable client",
+    "Fallback chime resource exists"
+  ],
+  "kotlin_compilation": "NOT RUN: SDK and Gradle unavailable; download blocked",
+  "unit_tests": "AUTHORED, NOT RUN",
+  "lint": "NOT RUN",
+  "device_tests": "NOT RUN",
+  "apk": "NOT PRODUCED"
+}
