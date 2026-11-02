@@ -167,6 +167,7 @@ class MainActivity: ComponentActivity() {
 }
 @Composable fun PlanEditor(initial:Plan,onSave:(Plan)->Unit) {
     var p by remember(initial){mutableStateOf(initial)}
+    var age by remember(initial){mutableStateOf(initial.age.toString())}
     var error by remember{mutableStateOf("")}
     Panel("موعدك الأسبوعي") {
         Row(verticalAlignment=androidx.compose.ui.Alignment.CenterVertically){Switch(p.enabled,{p=p.copy(enabled=it)});Text("تفعيل المنبّه")}
@@ -182,7 +183,6 @@ class MainActivity: ComponentActivity() {
         Slider(p.targetMinutes.toFloat(),{p=p.copy(targetMinutes=(it/15).toInt()*15)},valueRange=360f..600f,steps=15)
         Text("الاستغراق المتوقع: ${p.latencyMinutes} دقيقة")
         Slider(p.latencyMinutes.toFloat(),{p=p.copy(latencyMinutes=(it/5).toInt()*5)},valueRange=0f..90f,steps=17)
-        var age by remember(initial){mutableStateOf(initial.age.toString())}
         Field("العمر",age,{age=it;it.toIntOrNull()?.let{n->p=p.copy(age=n)}})
         Text(if(p.age in 18..64) "للبالغين عادة 7–9 ساعات؛ اضبط الهدف لاحتياجك." else if(p.age>=65) "يختلف الاحتياج الفردي؛ ناقش مشكلات النوم المستمرة مع مختص." else "هذه النسخة موجّهة للبالغين؛ لا تستخدم توصياتها للأطفال والمراهقين.")
         val context=androidx.compose.ui.platform.LocalContext.current
