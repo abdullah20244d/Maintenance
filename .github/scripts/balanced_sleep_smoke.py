@@ -51,6 +51,25 @@ try:
     time.sleep(3)
     assert 'نوم متوازن' in ET.tostring(snapshot(),encoding='unicode')
     checks.append('Arabic main screen launches')
+    # Grant special access through Android's actual permission screen. A raw
+    # package app-op can be superseded by the UID mode during fresh install.
+    if 'يلزم السماح' in ET.tostring(snapshot(),encoding='unicode'):
+        tap_text('السماح بالمنبّهات الدقيقة')
+        time.sleep(2)
+        settings_root=snapshot()
+        switches=[n for n in settings_root.iter('node') if n.get('checkable')=='true']
+        assert switches, 'Exact-alarm settings switch not found'
+        for node in switches:
+            if node.get('checked')=='false':
+                b=[int(x) for x in re.findall(r'\d+',node.get('bounds',''))]
+                adb('shell','input','tap',str((b[0]+b[2])//2),str((b[1]+b[3])//2))
+        time.sleep(1)
+        adb('shell','input','keyevent','4')
+        adb('shell','am','start','-W','-n',PACKAGE+'/.MainActivity')
+        time.sleep(2)
+    (OUT/'exact-alarm-appops.txt').write_text(adb('shell','appops','get',PACKAGE,'SCHEDULE_EXACT_ALARM'))
+    assert 'يلزم السماح' not in ET.tostring(snapshot(),encoding='unicode'), 'Exact-alarm permission still unavailable'
+    checks.append('Exact-alarm special access enabled through Android settings')
     adb('shell','svc','wifi','disable')
     adb('shell','svc','data','disable')
     tap_text('اختبار الإيقاظ بعد 15 ثانية')
@@ -78,6 +97,7 @@ try:
     (OUT/'result.json').write_text(json.dumps({'status':'passed','checks':checks,'scope':'Android API 35 emulator, not Samsung hardware; audio loudness, Doze and overnight reliability not verified'},ensure_ascii=False,indent=2))
     print(json.dumps({'status':'passed','checks':checks},ensure_ascii=False))
 except Exception as error:
+    (OUT/'prefs-on-failure.xml').write_text(prefs())
     (OUT/'result.json').write_text(json.dumps({'status':'failed','passed_checks':checks,'error':str(error)},ensure_ascii=False,indent=2))
     (OUT/'logcat.txt').write_text(adb('logcat','-d','-v','brief',check=False))
     raise
