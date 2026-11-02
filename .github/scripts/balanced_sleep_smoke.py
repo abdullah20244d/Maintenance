@@ -85,7 +85,9 @@ try:
     adb('shell','wm','dismiss-keyguard',check=False)
     adb('shell','am','start','-W','-n',PACKAGE+'/.MainActivity')
     time.sleep(2)
-    tap_text('فتح المنبّه الجاري')
+    current=ET.tostring(snapshot(),encoding='unicode')
+    if 'إيقاف المنبّه' not in current:
+        tap_text('فتح المنبّه الجاري')
     tap_text('إيقاف المنبّه')
     time.sleep(2)
     assert re.search(r'name="ringing"\s+value="false"',prefs())
