@@ -73,7 +73,7 @@ class MainActivity: ComponentActivity() {
                                     if(possible<plan.targetMinutes) Text("إذا نمت الآن، النقص المتوقع عن هدفك: ${plan.targetMinutes-possible} دقيقة.")
                                 }
                             }
-                            PermissionPanel()
+                            PermissionPanel(rev)
                             if(store.prefs.getBoolean("ringing",false)) Button(onClick={startActivity(Intent(this@MainActivity,RingActivity::class.java))}) { Text("فتح المنبّه الجاري") }
                             val bed=store.prefs.getLong("bedStart",0)
                             if(bed==0L) Button(onClick={store.prefs.edit().putLong("bedStart",System.currentTimeMillis()).commit();revision++},modifier=Modifier.fillMaxWidth()) { Text("سأنام الآن") }
@@ -105,7 +105,7 @@ class MainActivity: ComponentActivity() {
                             } }
                         }
                         3 -> {
-                            PermissionPanel()
+                            PermissionPanel(rev)
                             Panel("بياناتك تحت سيطرتك") {
                                 Text("التخزين محلي. لا إنترنت ولا حساب ولا ميكروفون ولا تتبّع. النسخ الاحتياطي التلقائي معطّل. تصدير JSON يشمل بيانات صحية؛ اختر مكانًا آمنًا.")
                                 Button(onClick={export.launch("balanced-sleep-log.json")}) {Text("تصدير السجل")}
@@ -134,13 +134,13 @@ class MainActivity: ComponentActivity() {
             }) {Text("حذف")}},dismissButton={TextButton(onClick={deleteOpen=false}){Text("رجوع")}})
         } }
     }
-    @Composable private fun PermissionPanel() {
-        val exact=AlarmEngine.permitted(this)
-        val notification=Build.VERSION.SDK_INT<33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED
+    @Composable private fun PermissionPanel(refresh: Int) {
+        val exact=remember(refresh) { AlarmEngine.permitted(this) }
+        val notification=remember(refresh) { Build.VERSION.SDK_INT<33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED }
         val nm=getSystemService(NotificationManager::class.java)
-        val full=Build.VERSION.SDK_INT<34 || nm.canUseFullScreenIntent()
-        val volume=getSystemService(AudioManager::class.java).getStreamVolume(AudioManager.STREAM_ALARM)
-        val battery=getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        val full=remember(refresh) { Build.VERSION.SDK_INT<34 || nm.canUseFullScreenIntent() }
+        val volume=remember(refresh) { getSystemService(AudioManager::class.java).getStreamVolume(AudioManager.STREAM_ALARM) }
+        val battery=remember(refresh) { getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName) }
         fun settings(action:String) { runCatching{startActivity(Intent(action,Uri.parse("package:$packageName")))}.onFailure{toast("افتح إعدادات التطبيق من إعدادات الهاتف")} }
         Panel("جاهزية الإيقاظ") {
             Text("منبّه دقيق: ${if(exact) "مسموح" else "يلزم السماح"} • صوت المنبّه: $volume")
